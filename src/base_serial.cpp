@@ -78,7 +78,7 @@ std::string FindSerialDevice(std::string hwid)
     serial::PortInfo device = *iter++;
     if (device.hardware_id.compare(0,hwid.length(),hwid) == 0)
     {
-      ROS_DEBUG_STREAM("Found device " << hwid);
+      ROS_DEBUG_STREAM("Found device " << hwid << " on port " << device.port);
       return device.port;
     }
   }
@@ -99,7 +99,7 @@ int main(int argc, char **argv)
   // get parameters from private namespace:
   ros::NodeHandle _nh("~");
   std::string usb_hwid;
-  _nh.param("usb_hwid", usb_hwid, (std::string)"1fc9:0094");
+  _nh.param("usb_hwid", usb_hwid, (std::string)"16c0:0483");
 
   std::string portname = FindSerialDevice(usb_hwid);
   if ("" == portname)
