@@ -1,0 +1,4 @@
+[submodule "src/MessageSerial"]
+	path = src/MessageSerial
+	url = https://github.com/icboredman/PacketSerial.git
+	branch = MessageSerial
