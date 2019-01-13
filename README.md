@@ -1,6 +1,6 @@
 # base_serial
 
-A [ROS](http://www.ros.org) node that enables communication with robot base over a serial link.
+A [ROS](http://www.ros.org) node that enables communication with a robot base over a serial link.
 On the other end of this link is [cherokey_slave](https://github.com/icboredman/cherokey_slave) processor, implemented using Teensy 3.2 module for the purpose of controlling wheels, collecting odometry and managing battery.
 
 
@@ -14,5 +14,4 @@ On the other end of this link is [cherokey_slave](https://github.com/icboredman/
 
 
 ---
-More info about the project is here: https://BoredomProjects.net/index.php/projects/robot-navigation-usin$
-
+More info about the project is here: https://boredomprojects.net/index.php/projects/robot-navigation-using-stereo-vision-part-2
