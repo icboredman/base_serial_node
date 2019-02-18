@@ -3,7 +3,7 @@
 // publishes odometry and tf messages over ROS.
 // In addition, it subscribes to cmd_vel messages and retransmitts them to slave.
 //
-// Copyright (c) 2017 boredman <http://BoredomProjects.net>
+// Copyright (c) 2019 boredman <http://BoredomProjects.net>
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -38,24 +38,15 @@
 #define  MSG_SERIAL_SKIP_CRC
 #include "MessageSerial/MessageSerial.h"
 
+#include <pthread.h>
+pthread_t subscriber_thread;
 
 
-double cmd_vel_linear_x;
-double cmd_vel_angular_z;
-bool cmd_vel_received = false;
-
-/**************************************************************
- * 
- **************************************************************/
-void callback_cmd_vel(const geometry_msgs::Twist& cmd_vel)
-{
-  if( ! cmd_vel_received )
-  {
-    cmd_vel_linear_x = cmd_vel.linear.x;
-    cmd_vel_angular_z = cmd_vel.angular.z;
-    cmd_vel_received = true;
-  }
-}
+typedef struct {
+  int16_t speed_mm_s;
+  int16_t turn_mrad_s;
+} tDrive;
+Message<tDrive,7> *drive_;
 
 
 
@@ -88,6 +79,40 @@ std::string FindSerialDevice(std::string hwid)
 }
 
 
+/**************************************************************
+ * Ros callback for 'geometry_msgs::Twist' messages
+ **************************************************************/
+void callback_cmd_vel(const geometry_msgs::Twist& cmd_vel)
+{
+  drive_->data.speed_mm_s = (int16_t)(cmd_vel.linear.x * 1000.0);
+  drive_->data.turn_mrad_s = (int16_t)(cmd_vel.angular.z * 1000.0);
+  if (!drive_->send())
+    ROS_ERROR("Drive send failed");
+}
+
+
+
+/**************************************************************
+ * Thread to spin incoming messages loop
+ **************************************************************/
+void* SubscriberWorker(void* param)
+{
+  ROS_DEBUG_STREAM("Subscriber Thread started");
+  ros::NodeHandle *nh = (ros::NodeHandle*)param;
+
+  ros::Subscriber sub_vel = nh->subscribe("cmd_vel", 10, callback_cmd_vel);
+
+  ros::Duration duration(0.050);
+  while(ros::ok())
+  {
+    ros::spinOnce();
+    duration.sleep();
+  }
+
+  ROS_DEBUG_STREAM("Subscriber Thread stopped");
+}
+
+
 
 /**************************************************************
  * Main
@@ -109,7 +134,7 @@ int main(int argc, char **argv)
   }
 
   // configure hardware serial port
-  serial::Serial uart(portname, 115200, serial::Timeout(0,0,0,250,0));
+  serial::Serial uart(portname, 115200, serial::Timeout(0,100,0,250,0));
 
   // MessageSerial object will use the above port
   MessageSerial serial(uart);
@@ -133,11 +158,7 @@ int main(int argc, char **argv)
   } tOdom;
   Message<tOdom,5> odom(serial);
 
-  typedef struct {
-    int16_t speed_mm_s;
-    int16_t turn_mrad_s;
-  } tDrive;
-  Message<tDrive,7> drive(serial);
+  drive_ = new Message<tDrive,7>(serial);
 
   typedef struct {
     char str[100];
@@ -153,7 +174,11 @@ int main(int argc, char **argv)
   // publish and subscribe under this namespace:
   ros::NodeHandle nh;
 
-  ros::Subscriber sub_vel = nh.subscribe("cmd_vel", 10, callback_cmd_vel);
+  if (pthread_create(&subscriber_thread, NULL, &SubscriberWorker, (void*)&nh) != 0)
+  {
+    ROS_ERROR_STREAM("Couldn't create Subscriber THREAD");
+    exit(3);
+  }
 
   sensor_msgs::BatteryState bat_msg;
   ros::Publisher pub_bat = nh.advertise<sensor_msgs::BatteryState>("battery", 5);
@@ -176,15 +201,6 @@ int main(int argc, char **argv)
   {
     // message processing function
     serial.update();
-
-    if( cmd_vel_received )
-    {
-      drive.data.speed_mm_s = (int16_t)(cmd_vel_linear_x * 1000.0);
-      drive.data.turn_mrad_s = (int16_t)(cmd_vel_angular_z * 1000.0);
-      if( ! drive.send() )
-        ROS_ERROR("Drive send failed");
-      cmd_vel_received = false;
-    }
 
     if( power.available() )
     {
@@ -282,9 +298,8 @@ int main(int argc, char **argv)
     }
     if( bat_connected || odom_connected )
       conn_lost_timeout = false;
-
-    ros::spinOnce();
   }
 
 }
+
 
