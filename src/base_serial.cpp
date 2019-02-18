@@ -134,7 +134,9 @@ int main(int argc, char **argv)
   }
 
   // configure hardware serial port
-  serial::Serial uart(portname, 115200, serial::Timeout(0,100,0,250,0));
+  // setting both inter_byte_timeout and read_timeout_constant
+  // enables thread suspension between bursts of read data
+  serial::Serial uart(portname, 115200, serial::Timeout(20,20,0,250,0));
 
   // MessageSerial object will use the above port
   MessageSerial serial(uart);
@@ -287,6 +289,7 @@ int main(int argc, char **argv)
     {
       ROS_INFO_STREAM(text.data.str);
       text.ready();
+      last_recv_time = ros::Time::now();
     }
 
     if( !conn_lost_timeout && ros::Time::now() - last_recv_time > conn_lost_duration )
@@ -301,5 +304,3 @@ int main(int argc, char **argv)
   }
 
 }
-
-
