@@ -1,9 +1,9 @@
 // =============================================================================
 // This program enables serial communication with slave base microcontroller and
 // publishes odometry and tf messages over ROS.
-// In addition, it subscribes to cmd_vel messages and retransmitts them to slave.
+// In addition, it subscribes to cmd_vel messages and retransmitts them to base.
 //
-// Copyright (c) 2017 boredman <http://BoredomProjects.net>
+// Copyright (c) 2019 boredman <http://BoredomProjects.net>
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -35,27 +35,36 @@
 #include <time.h>
 
 #include "serial/serial.h"
-#define  MSG_SERIAL_SKIP_CRC
-#include "MessageSerial/MessageSerial.h"
 
+#include <pthread.h>
+pthread_t subscriber_thread;
 
+serial::Serial *uart_;
 
-double cmd_vel_linear_x;
-double cmd_vel_angular_z;
-bool cmd_vel_received = false;
+typedef struct Power {
+  uint16_t battery_miV;
+  int16_t  battery_miA;
+  uint16_t battery_mOhm;
+  uint8_t  charger_state;
+  uint8_t  bat_percentage;
+} tPower;
 
-/**************************************************************
- * 
- **************************************************************/
-void callback_cmd_vel(const geometry_msgs::Twist& cmd_vel)
-{
-  if( ! cmd_vel_received )
-  {
-    cmd_vel_linear_x = cmd_vel.linear.x;
-    cmd_vel_angular_z = cmd_vel.angular.z;
-    cmd_vel_received = true;
-  }
-}
+typedef struct {
+  float theta;
+  float dx;
+  float dth;
+  uint16_t dt_ms;
+} tOdom;
+
+typedef struct {
+  tPower power;
+  tOdom  odom;
+} tRxPacket;
+
+typedef struct {
+  int16_t speed_mm_s;
+  int16_t turn_mrad_s;
+} tDrive;
 
 
 
@@ -88,6 +97,45 @@ std::string FindSerialDevice(std::string hwid)
 }
 
 
+/**************************************************************
+ * Ros callback for 'geometry_msgs::Twist' messages
+ **************************************************************/
+void callback_cmd_vel(const geometry_msgs::Twist& cmd_vel)
+{
+  tDrive drive;
+
+  drive.speed_mm_s = (int16_t)(cmd_vel.linear.x * 1000.0);
+  drive.turn_mrad_s = (int16_t)(cmd_vel.angular.z * 1000.0);
+
+  if (uart_->isOpen())
+    uart_->write((uint8_t*)&drive, sizeof(drive));
+  else
+    ROS_ERROR_STREAM("Serial port error");
+}
+
+
+
+/**************************************************************
+ * Thread to spin incoming messages loop
+ **************************************************************/
+void* SubscriberWorker(void* param)
+{
+  ROS_DEBUG_STREAM("Subscriber Thread started");
+  ros::NodeHandle *nh = (ros::NodeHandle*)param;
+
+  ros::Subscriber sub_vel = nh->subscribe("cmd_vel", 10, callback_cmd_vel);
+
+  ros::Duration duration(0.050);
+  while(ros::ok())
+  {
+    ros::spinOnce();
+    duration.sleep();
+  }
+
+  ROS_DEBUG_STREAM("Subscriber Thread stopped");
+}
+
+
 
 /**************************************************************
  * Main
@@ -109,42 +157,11 @@ int main(int argc, char **argv)
   }
 
   // configure hardware serial port
-  serial::Serial uart(portname, 115200, serial::Timeout(0,0,0,250,0));
+  // setting both inter_byte_timeout and read_timeout_constant
+  // enables thread suspension between bursts of read data
+  uart_ = new serial::Serial(portname, 115200, serial::Timeout(10,100,0,250,0));
 
-  // MessageSerial object will use the above port
-  MessageSerial serial(uart);
-
-  // define actual messages and create corresponding Message objects
-  typedef struct Power {
-    uint16_t battery_miV;
-    int16_t  battery_miA;
-    uint16_t battery_mOhm;
-    uint8_t  charger_state;
-    uint8_t  bat_percentage;
-  } tPower;
-  // Message objects should reference the above MessageSerial object
-  Message<tPower,2> power(serial);
-
-  typedef struct {
-    float theta;
-    float dx;
-    float dth;
-    uint16_t dt_ms;
-  } tOdom;
-  Message<tOdom,5> odom(serial);
-
-  typedef struct {
-    int16_t speed_mm_s;
-    int16_t turn_mrad_s;
-  } tDrive;
-  Message<tDrive,7> drive(serial);
-
-  typedef struct {
-    char str[100];
-  } tStr;
-  Message<tStr,1> text(serial); // message id 1 is reserved for character string messages
-
-  if( ! uart.isOpen() )
+  if( ! uart_->isOpen() )
   {
     ROS_ERROR("fail init serial device");
     exit(2);
@@ -153,7 +170,11 @@ int main(int argc, char **argv)
   // publish and subscribe under this namespace:
   ros::NodeHandle nh;
 
-  ros::Subscriber sub_vel = nh.subscribe("cmd_vel", 10, callback_cmd_vel);
+  if (pthread_create(&subscriber_thread, NULL, &SubscriberWorker, (void*)&nh) != 0)
+  {
+    ROS_ERROR_STREAM("Couldn't create Subscriber THREAD");
+    exit(3);
+  }
 
   sensor_msgs::BatteryState bat_msg;
   ros::Publisher pub_bat = nh.advertise<sensor_msgs::BatteryState>("battery", 5);
@@ -166,53 +187,24 @@ int main(int argc, char **argv)
   bat_msg.power_supply_technology = sensor_msgs::BatteryState::POWER_SUPPLY_TECHNOLOGY_NIMH;
   bat_msg.present = true;
 
-  ros::Time last_recv_time = ros::Time::now();
+  ros::Time packet_recv_time = ros::Time::now();
+  ros::Time battery_send_time = ros::Time::now();
   ros::Duration conn_lost_duration(5);	//sec
-  bool conn_lost_timeout = false;
-  bool bat_connected = false;
-  bool odom_connected = false;
+  bool base_connected = false;
+
+  tRxPacket rxPacket;
 
   while( ros::ok() )
   {
-    // message processing function
-    serial.update();
-
-    if( cmd_vel_received )
+    // read will suspend execution until packet arrives
+    if (uart_->read((uint8_t*)&rxPacket, sizeof(tRxPacket)) == sizeof(tRxPacket))
     {
-      drive.data.speed_mm_s = (int16_t)(cmd_vel_linear_x * 1000.0);
-      drive.data.turn_mrad_s = (int16_t)(cmd_vel_angular_z * 1000.0);
-      if( ! drive.send() )
-        ROS_ERROR("Drive send failed");
-      cmd_vel_received = false;
-    }
+      packet_recv_time = ros::Time::now();
 
-    if( power.available() )
-    {
-      bat_msg.current = power.data.battery_miA / 1023.0;
-      bat_msg.voltage = power.data.battery_miV / 1023.0;
-      bat_msg.charge = power.data.battery_mOhm / 1000.0; // use for internal resistance
-      bat_msg.power_supply_status = power.data.charger_state;
-      bat_msg.percentage = power.data.bat_percentage / 100.0;
-      power.ready();
-      pub_bat.publish(bat_msg);
-
-      if( ! bat_connected )
-      {
-        ROS_INFO("Base sending BatteryState");
-        bat_connected = true;
-      }
-      last_recv_time = ros::Time::now();
-    }
-
-    if( odom.available() )
-    {
-      ros::Time current_time = ros::Time::now();
-
-      double theta = odom.data.theta;
-      double dx = odom.data.dx;
-      double dth = odom.data.dth;
-      double dt = odom.data.dt_ms / 1000.0;
-      odom.ready();
+      double theta = rxPacket.odom.theta;
+      double dx = rxPacket.odom.dx;
+      double dth = rxPacket.odom.dth;
+      double dt = rxPacket.odom.dt_ms / 1000.0;
 
       double vx = dx / dt;
       double vth = dth / dt;
@@ -227,7 +219,7 @@ int main(int argc, char **argv)
 
       //first, we'll publish the transform over tf
       geometry_msgs::TransformStamped odom_tf;
-      odom_tf.header.stamp = current_time;
+      odom_tf.header.stamp = packet_recv_time;
       odom_tf.header.frame_id = "odom";
       odom_tf.child_frame_id = "base_link";
 
@@ -241,7 +233,7 @@ int main(int argc, char **argv)
 
       //next, we'll publish the odometry message over ROS
       nav_msgs::Odometry odom_msg;
-      odom_msg.header.stamp = current_time;
+      odom_msg.header.stamp = packet_recv_time;
       odom_msg.header.frame_id = "odom";
 
       //set the position
@@ -259,31 +251,30 @@ int main(int argc, char **argv)
       //publish the message
       pub_odom.publish(odom_msg);
 
-      if( ! odom_connected )
-      {
-        ROS_INFO("Base sending tf and odom");
-        odom_connected = true;
+      if ((ros::Time::now() - battery_send_time) > ros::Duration(0.25))
+      { //process battery status
+        bat_msg.current = rxPacket.power.battery_miA / 1023.0;
+        bat_msg.voltage = rxPacket.power.battery_miV / 1023.0;
+        bat_msg.charge = rxPacket.power.battery_mOhm / 1000.0; // used for internal resistance
+        bat_msg.power_supply_status = rxPacket.power.charger_state;
+        bat_msg.percentage = rxPacket.power.bat_percentage / 100.0;
+
+        pub_bat.publish(bat_msg);
+        battery_send_time = ros::Time::now();
       }
-      last_recv_time = ros::Time::now();
+
+      if (!base_connected)
+      {
+        ROS_INFO("Base sending tf, odom and battery_state");
+        base_connected = true;
+      }
     }
 
-    if( text.available() )
-    {
-      ROS_INFO_STREAM(text.data.str);
-      text.ready();
-    }
-
-    if( !conn_lost_timeout && ros::Time::now() - last_recv_time > conn_lost_duration )
+    if (base_connected && (ros::Time::now() - packet_recv_time) > conn_lost_duration)
     {
       ROS_ERROR("Lost communication with Base");
-      bat_connected = false;
-      odom_connected = false;
-      conn_lost_timeout = true;
+      base_connected = false;
     }
-    if( bat_connected || odom_connected )
-      conn_lost_timeout = false;
-
-    ros::spinOnce();
   }
 
 }
