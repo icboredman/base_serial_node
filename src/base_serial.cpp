@@ -34,6 +34,9 @@
 #include <sys/time.h>
 #include <time.h>
 
+#include <fstream>      // std::ifstream
+#include <sensor_msgs/Temperature.h>
+
 #include "serial/serial.h"
 #define  MSG_SERIAL_SKIP_CRC
 #include "MessageSerial/MessageSerial.h"
@@ -194,10 +197,13 @@ int main(int argc, char **argv)
   bat_msg.present = true;
 
   ros::Time last_recv_time = ros::Time::now();
-  ros::Duration conn_lost_duration(5);	//sec
   bool conn_lost_timeout = false;
   bool bat_connected = false;
   bool odom_connected = false;
+
+  ros::Time last_temp_reading = ros::Time::now();
+  sensor_msgs::Temperature temp_msg;
+  ros::Publisher pub_temp = nh.advertise<sensor_msgs::Temperature>("temperature", 5);
 
   while( ros::ok() )
   {
@@ -206,6 +212,9 @@ int main(int argc, char **argv)
 
     if( power.available() )
     {
+      last_recv_time = ros::Time::now();
+
+      bat_msg.header.stamp = last_recv_time;
       bat_msg.current = power.data.battery_miA / 1023.0;
       bat_msg.voltage = power.data.battery_miV / 1023.0;
       bat_msg.charge = power.data.battery_mOhm / 1000.0; // use for internal resistance
@@ -219,12 +228,11 @@ int main(int argc, char **argv)
         ROS_INFO("Base sending BatteryState");
         bat_connected = true;
       }
-      last_recv_time = ros::Time::now();
     }
 
     if( odom.available() )
     {
-      ros::Time current_time = ros::Time::now();
+      last_recv_time = ros::Time::now();
 
       double theta = odom.data.theta;
       double dx = odom.data.dx;
@@ -245,7 +253,7 @@ int main(int argc, char **argv)
 
       //first, we'll publish the transform over tf
       geometry_msgs::TransformStamped odom_tf;
-      odom_tf.header.stamp = current_time;
+      odom_tf.header.stamp = last_recv_time;
       odom_tf.header.frame_id = "odom";
       odom_tf.child_frame_id = "base_link";
 
@@ -259,7 +267,7 @@ int main(int argc, char **argv)
 
       //next, we'll publish the odometry message over ROS
       nav_msgs::Odometry odom_msg;
-      odom_msg.header.stamp = current_time;
+      odom_msg.header.stamp = last_recv_time;
       odom_msg.header.frame_id = "odom";
 
       //set the position
@@ -282,17 +290,16 @@ int main(int argc, char **argv)
         ROS_INFO("Base sending tf and odom");
         odom_connected = true;
       }
-      last_recv_time = ros::Time::now();
     }
 
     if( text.available() )
     {
+      last_recv_time = ros::Time::now();
       ROS_INFO_STREAM(text.data.str);
       text.ready();
-      last_recv_time = ros::Time::now();
     }
 
-    if( !conn_lost_timeout && ros::Time::now() - last_recv_time > conn_lost_duration )
+    if( !conn_lost_timeout && (ros::Time::now() - last_recv_time) > ros::Duration(5) )
     {
       ROS_ERROR("Lost communication with Base");
       bat_connected = false;
@@ -301,6 +308,26 @@ int main(int argc, char **argv)
     }
     if( bat_connected || odom_connected )
       conn_lost_timeout = false;
+    
+    if ((ros::Time::now() - last_temp_reading) > ros::Duration(1))
+    {
+      last_temp_reading = ros::Time::now();
+
+      // read temperature
+      int cpu_temp_millideg = 0;
+      std::ifstream ifthermal("/sys/class/thermal/thermal_zone3/temp", std::ifstream::in);
+      if (ifthermal.good())
+        ifthermal >> cpu_temp_millideg;
+      ifthermal.close();
+
+      // send to Arduino (Leonardo)
+
+      // publish as ROS message
+      temp_msg.header.stamp = last_temp_reading;
+      temp_msg.temperature = cpu_temp_millideg / 1000.0;
+      temp_msg.variance = 0.0;
+      pub_temp.publish(temp_msg);
+    }
   }
 
 }
