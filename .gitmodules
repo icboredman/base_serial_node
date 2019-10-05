@@ -2,3 +2,6 @@
 	path = src/MessageSerial
 	url = https://github.com/icboredman/PacketSerial.git
 	branch = MessageSerial
+[submodule "src/Arduino/cherokey_slave"]
+	path = src/Arduino/cherokey_slave
+	url = https://github.com/icboredman/cherokey_slave

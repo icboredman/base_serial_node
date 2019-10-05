@@ -126,8 +126,10 @@ int main(int argc, char **argv)
 
   // get parameters from private namespace:
   ros::NodeHandle _nh("~");
+
+  // configure connection to Base controller (Teensy)
   std::string usb_hwid;
-  _nh.param("usb_hwid", usb_hwid, (std::string)"16c0:0483");
+  _nh.param("base_usb_hwid", usb_hwid, (std::string)"16c0:0483");
 
   std::string portname = FindSerialDevice(usb_hwid);
   if ("" == portname)
@@ -139,10 +141,18 @@ int main(int argc, char **argv)
   // configure hardware serial port
   // setting both inter_byte_timeout and read_timeout_constant
   // enables thread suspension between bursts of read data
-  serial::Serial uart(portname, 115200, serial::Timeout(20,20,0,250,0));
+  serial::Serial base_uart(portname, 115200, serial::Timeout(20,20,0,250,0));
+
+  if (!base_uart.isOpen())
+  {
+    ROS_ERROR("Unable to open Base port: %s", portname.c_str());
+    exit(2);
+  }
+  else
+    ROS_INFO("Base port found and opened: %s", portname.c_str());
 
   // MessageSerial object will use the above port
-  MessageSerial serial(uart);
+  MessageSerial serial(base_uart);
 
   // define actual messages and create corresponding Message objects
   typedef struct Power {
@@ -170,11 +180,31 @@ int main(int argc, char **argv)
   } tStr;
   Message<tStr,1> text(serial); // message id 1 is reserved for character string messages
 
-  if( ! uart.isOpen() )
+  // configure connection to Fan Controller (Leonardo on LattePanda)
+  _nh.param("fan_usb_hwid", usb_hwid, (std::string)"2341:8036");
+
+  portname = FindSerialDevice(usb_hwid);
+  if ("" == portname)
   {
-    ROS_ERROR("fail init serial device");
-    exit(2);
+    ROS_ERROR_STREAM("No connection to Fan Controller");
+    exit(3);
   }
+
+  // configure hardware serial port
+  // we don't care about timeouts here
+  serial::Serial fan_uart(portname, 115200);
+
+  if (!fan_uart.isOpen())
+  {
+    ROS_ERROR("Unable to open Fan port: %s", portname.c_str());
+    exit(4);
+  }
+  else
+    ROS_INFO("Fan port found and opened: %s", portname.c_str());
+
+  // seems to be necessary for Leonardo on LattePanda
+  fan_uart.setDTR();
+  fan_uart.setRTS();
 
   // publish and subscribe under this namespace:
   ros::NodeHandle nh;
@@ -182,7 +212,7 @@ int main(int argc, char **argv)
   if (pthread_create(&subscriber_thread, NULL, &SubscriberWorker, (void*)&nh) != 0)
   {
     ROS_ERROR_STREAM("Couldn't create Subscriber THREAD");
-    exit(3);
+    exit(5);
   }
 
   sensor_msgs::BatteryState bat_msg;
@@ -308,23 +338,32 @@ int main(int argc, char **argv)
     }
     if( bat_connected || odom_connected )
       conn_lost_timeout = false;
-    
-    if ((ros::Time::now() - last_temp_reading) > ros::Duration(1))
+
+    if ((ros::Time::now() - last_temp_reading) > ros::Duration(2))
     {
       last_temp_reading = ros::Time::now();
 
       // read temperature
       int cpu_temp_millideg = 0;
       std::ifstream ifthermal("/sys/class/thermal/thermal_zone3/temp", std::ifstream::in);
-      if (ifthermal.good())
+      if (!ifthermal.good())
+      {
+        ROS_ERROR("Unable to read CPU temperature");
+        exit(6);
+      }
+      else
+      {
         ifthermal >> cpu_temp_millideg;
-      ifthermal.close();
+        ifthermal.close();
+      }
 
       // send to Arduino (Leonardo)
+      uint8_t cpu_temp_deg = cpu_temp_millideg / 1000;
+      fan_uart.write(&cpu_temp_deg, 1);
 
       // publish as ROS message
       temp_msg.header.stamp = last_temp_reading;
-      temp_msg.temperature = cpu_temp_millideg / 1000.0;
+      temp_msg.temperature = cpu_temp_deg;
       temp_msg.variance = 0.0;
       pub_temp.publish(temp_msg);
     }
